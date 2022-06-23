@@ -1,0 +1,686 @@
+---
+title: "5291-proj-tiemseries"
+author: "Peixuan Song uni:ps3193"
+date: "4/22/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+##Linear Regression
+## Data load 
+```{r}
+require(httr)
+library(jsonlite)
+
+getdata <- function(name){
+  headers <- c(`Upgrade-Insecure-Requests` = '1')
+
+  params <- list(`datatype` = 'json',
+                `apikey` = '2c2cd38706ef0b12bdbf80a33806aa32')
+  url <- paste('https://financialmodelingprep.com/api/v4/economic?name=', 
+               name, '&from=2019-10-10&to=2021-11-10', sep="")
+  res <- httr::GET(url = url, 
+                   httr::add_headers(.headers=headers), query = params)
+  # http_type(res)
+  # http_error(res)
+  data.raw <- rawToChar(res$content)
+  data <- fromJSON(data.raw)
+  return(data)
+}
+
+unemp.rate <- getdata("unemploymentRate")
+fed.funds <- getdata("federalFunds")
+retail.funds <- getdata("retailMoneyFunds")
+cpi <- getdata("CPI")
+durable.goods <- getdata("durableGoods")
+mort.fr <- getdata("15YearFixedRateMortgageAverage")
+cons.sent <- getdata("consumerSentiment")
+retail.sales <- getdata("retailSales")
+gdp <- getdata("GDP")
+
+```
+
+## Data description 
+1. unemploymentRate: The number of unemployed people as a percentage of the labor force. 
+
+2. federalFunds: Excess reserves that commercial banks and other financial institutions deposit at regional Federal Reserve banks (rate). 
+
+3. retailMoneyFunds(unit: billion): Value of certain financial assets held by households, businesses, nonprofit organizations, and state and local governments. 
+
+4. durableGoods: Total number of durable goods orders. 
+
+5. 15YearFixedRateMortgageAverage: A fixed-rate mortgage is a home loan option with a specific interest rate for the entire term of the loan for 15 years in total payback period. 
+
+6. retailSales(unit: million): Amount spending in retail market
+
+7. consumerSentiment: The index aids in measuring consumer sentiments in personal finances, business conditions, among other topics.
+
+```{r}
+# retail.funds
+# fed.funds
+# unemp.rate
+# durable.goods
+# mort.fr
+# cons.sent
+# retail.sales
+
+```
+
+## Data preprocessing 
+1. Convert CPI to monthly inflation rate 
+Inflation rate calculation using CPI: (X2-X1)/X1
+```{r}
+library(tidyverse)
+# min(cpi$date)
+# max(cpi$date)
+# sum(is.na(cpi))
+n <- length(cpi$value)
+
+
+inflation <- rep(NA, 25)
+for (i in 1:24){
+  inflation[i] <- (cpi$value[i]-cpi$value[i+1])/cpi$value[i+1]*100
+}
+
+inf.rate <- cpi
+inf.rate["inflation_rate"] <- inflation
+inf.rate <- inf.rate %>% select(date, inflation_rate) %>% drop_na()
+
+head(inf.rate)
+```
+2. Monthly average mortgage fixed rate 
+```{r}
+mort.fr2 <- mort.fr %>% 
+  mutate(date = paste(str_sub(date, 1, 7), "-01", sep="")) %>% 
+  group_by(date) %>%
+  summarize(fixed_rate = mean(value))
+
+
+head(mort.fr2)
+
+```
+3. Join data by date, each column contains the monthly values for each feature. 
+```{r}
+
+# (X2-X1)/X1*100
+
+final.data <- retail.funds %>% left_join(retail.sales, by="date") %>%
+  left_join(fed.funds, by="date") %>%
+  left_join(unemp.rate,  by="date") %>%
+  left_join(durable.goods,  by="date") %>%
+  left_join(mort.fr2,  by="date") %>%
+  left_join(cons.sent,  by="date") %>%
+  left_join(inf.rate,  by="date") %>% drop_na() %>% 
+  select(-date)
+
+names <- c("retail_funds", "retail_sales", 
+           "federal_funds_rate", "unemployment_rate", "durable_goods",
+           "mortgage_fixed_rate", "consumer_sentiment", "inflation_rate")
+colnames(final.data) <- names
+head(final.data)
+
+```
+## EDA 
+1. Boxplot 
+The boxplot shows that retail funds and inflation rate have normal distributions and have no or just one outlier. Durable Goods and Retail Sales are slightly skewed to the left. Unemployment Rate and Federal Funds Rate have some outliers and are skewed to the right as same as the Mortgage Fixed Rate and Consumer Sentiment.
+```{r}
+scaled.data <- final.data %>%
+  mutate(retail_funds = scale(retail_funds), 
+         retail_sales = scale(retail_sales),
+         federal_funds_rate = scale(federal_funds_rate), 
+         unemployment_rate = scale(unemployment_rate), 
+         durable_goods = scale(durable_goods), 
+         mortgage_fixed_rate = scale(mortgage_fixed_rate), 
+         consumer_sentiment = scale(consumer_sentiment))
+
+boxplot(scaled.data,las=2)
+
+
+```
+
+2. Check normality 
+Inflation rate has greater correlation with retail sales, durable goods, and mortgage fixed rate. There are some predictors have high correlation with each other, which indicates that muticolinearity may exist.
+Check normality assumption using Q-Q plot and Shapiro–Wilk test
+Q-Q plot: retail sales, and inflation rate have normal correlation
+Shapiro–Wilk test: have the same result with Q-Q plot
+H0: the data are normally distributed
+Ha: the data are not normal
+```{r}
+library(car)
+df <- final.data
+# correlation matrix 
+panel.cor <- function(x, y, digits = 2, prefix = "", cex.cor, ...) {
+    usr <- par("usr")
+    on.exit(par(usr))
+    par(usr = c(0, 1, 0, 1))
+    Cor <- abs(cor(x, y)) # Remove abs function if desired
+    txt <- paste0(prefix, format(c(Cor, 0.123456789), digits = digits)[1])
+    if(missing(cex.cor)) {
+        cex.cor <- 0.4 / strwidth(txt)
+    }
+    text(0.5, 0.5, txt,
+         cex = 1 + cex.cor * Cor) # Resize the text by level of correlation
+}
+
+pairs(df,
+      upper.panel = panel.cor,    # Correlation panel
+      lower.panel = panel.smooth) # Smoothed regression lines
+
+
+qqplot.data <- c(df$retail_funds, df$retail_sales, df$federal_funds_rate, 
+                 df$unemployment_rate, df$durable_goods,
+                 df$mortgage_fixed_rate, df$consumer_sentiment, 
+                 df$inflation_rate)
+
+shp.test <- c()
+names <- colnames(df)
+
+
+for (data in df) {
+  qqPlot(data)
+  shp.test <- append(shp.test, shapiro.test(data)$p.value)
+}
+
+shapiro <- data.frame(data=names, p_value=shp.test)
+shapiro <- shapiro %>% mutate(
+  shapiro_test_result = case_when(p_value > 0.05 ~ "normal", 
+                                  TRUE ~ "not normal"))
+
+shapiro
+
+```
+
+3. Parallel coordinate plot (interactive plot)
+If the lines within two variables are parallel, then there is a positive association between them. If the lines are twisted, then they are more likely to have negative relationship. For example, the lines between retail funds and retail sales seem twisted, retail funds increase when retail sales decrease, which shows a negative relationship...(may add more cases here)
+```{r}
+library(parcoords)
+df <- final.data
+parcoords(df, rownames = F, reorderable = T , queue = T, 
+          withD3 = TRUE, alpha=0.5)
+
+```
+## Modeling 
+1. Linear regression
+Include all predictors in the model, perform ANOVA test. The results are not very optimal.
+Predictors except intercept and retail funds have p-value>0.05.
+```{r}
+m1.all <- lm(inflation_rate ~ . , data=final.data)
+summary(m1.all)
+```
+
+2. Power transformation
+Based on the result of linear regression, we found p-values of most coefficient estimates > 0.05...(may explain more from the summary)
+
+Therefore, we guessed not linear? Use a power transformation to create transformation data using power functions. 
+```{r}
+library(car)
+(a <- powerTransform(cbind(retail_funds, retail_sales, 
+           federal_funds_rate, unemployment_rate, durable_goods,
+           mortgage_fixed_rate, consumer_sentiment)~1 , data=df))
+
+testTransform(a, lambda = c(-4, 1, 0, -1, 8, -2, 1))
+
+#
+# testTransform(a, lambda = c(-4, 1, 0, -1, 8, -2, 1))
+
+
+
+```
+
+However, the model after transformation still does not perform well. Since we found collinearity among the variables in correlation matrix before, it is possible that collinearity highly influences the model...(may explain more) 
+```{r}
+
+m2.trans <- lm(inflation_rate ~ I(retail_funds^(-4)) + retail_sales + 
+           log(federal_funds_rate) + I(unemployment_rate^(-1)) +
+           I(durable_goods^8) + 
+           I(mortgage_fixed_rate^(-2)) + consumer_sentiment, data=df)
+
+summary(m2.trans)
+
+
+```
+
+To deal with collinearity between features, we applied two methods. 
+1. Exhaustive, forward selection, backward elimination 
+Both methods have the same AIC and select the same model:
+Inflation rate=-11.57+0.004326 * retail funds+ 0.0000077 * retail sales +0.0000081 * durable goods + 0.069 * mortgage fixed rate
+```{r}
+# exhaustive search 
+library(leaps)
+m.exh = regsubsets(inflation_rate~ ., data = final.data, nvmax = NULL, method = "exhaustive")
+plot(summary(m.exh)$cp, col = "blue", type = "l", xlab = "Model size", ylab = "Cp")
+
+m.all <- lm(inflation_rate ~ ., data = final.data)
+m.0 <- lm(inflation_rate ~ 1., data = final.data)
+scope <- list(lower=formula(m.0), upper=formula(m.all))
+plot(m.exh, main = "Exhaustive")
+
+
+# forward selection
+m.fs <- step(m.0, direction="forward", scope=scope)
+print(summary(m.fs))
+
+# backward selection 
+m.be <- step(m.all, direction="backward", scope=scope)
+print(summary(m.be))
+
+```
+
+
+2. Final model 
+```{r}
+m3.final <- lm(inflation_rate ~ durable_goods + mortgage_fixed_rate + 
+           retail_funds + retail_sales, data=df)
+summary(m3.final)
+
+```
+3. Check assumptions of linear regression
+Check Linearity of the data (Residuals vs Fitted):
+The red line is approximately horizontal at zero. Residual plot shows no fitted pattern. 
+
+Homogeneity of variance (Scale-Location): 
+Though residuals scattered wider as fitted value increase, there is a horizontal line with roughly equally spread points.
+
+Normality of residuals (Normal Q-Q):
+Almost all the points fall along the line.
+
+Outliers and high leverage points (Residuals vs Leverage):
+The plot above highlights the top 3 most extreme points (#12, #18 and #24). #12 and #18 have standardized residuals around 1.5 and #24 below -1. There are no outliers that exceed 2 standard deviations, which is good.
+There is no high leverage point in the data. All data points have a leverage statistic below 2(p + 1)/n = 10/120 = 0.083.
+There is one influential value/outlier, one point below Cook’s distance.
+```{r}
+par(mfrow = c(2, 2))
+plot(m3.final)
+```
+4. PCA
+In order to find the correlation between features, we looked at PCA and its plots...(may explain more about the PCA plot and relationship observed from it) 
+
+The validation plot and model summary indicate that three or four components with % of variance explained > 95% or > 98% would be good enough to explain our data...
+
+```{r}
+library(ggfortify)
+library(caTools)
+library(nnet)
+library(pls)
+pca_res <- prcomp(df, center = TRUE, scale. = TRUE)
+summary(pca_res)
+screeplot(pca_res, type = "line", main = "Scree plot")
+
+autoplot(pca_res,  loadings = TRUE, loadings.colour = 'blue',
+         loadings.label = TRUE)
+
+
+plsr_model <- plsr(inflation_rate~., data = df, scale = TRUE, validation = "CV")
+summary(plsr_model)
+
+validationplot(plsr_model)
+
+
+```
+## Train and test split 
+```{r}
+split = sample(c(TRUE, FALSE), 24, replace=TRUE, prob=c(0.75, 0.25))
+
+train = df[split, ]
+test = df[!split, ]
+
+```
+## Fit and compare model 
+```{r}
+library(Metrics)
+# linear regression
+ml <- lm(inflation_rate ~ durable_goods + mortgage_fixed_rate + 
+           retail_funds + retail_sales, data=train)
+summary(ml)
+predl <- predict(ml, test)
+
+msel <- mean((predl-test$inflation_rate)^2)
+
+# pca
+mp <- plsr(inflation_rate~., data = train, scale = TRUE, validation = "CV")
+summary(mp)
+predp <- predict(mp, test)
+msep <- mean((predp-test$inflation_rate)^2)
+
+
+```
+
+
+
+-----------------------------------------------------------------------------------------------
+##Time Series
+```{r}
+data=read.csv('target_1822_0101.csv')
+library(zoo)
+library(tseries)
+library(forecast)
+library(Metrics)
+library(cowplot)
+library(lmtest)
+
+
+dz<-read.zoo(data)
+plot(dz, plot.type = "single", pch=16,type='l', main="Time series Plot of Inflation Rate", xlab='Date: from Jan 1, 2018 to Dec 31, 2021', ylab='Inflation Rate(%)')
+
+```
+
+## using ts to observe seasonality and trend
+```{r}
+
+tsdata <- ts((data[order(nrow(data):1),])[,2], frequency = 251,start=c(2018, 1))
+autoplot(tsdata)
+mfit <- decompose(x = tsdata, type = c("additive", "multiplicative"))
+autoplot(mfit)
+plot(mfit$trend,type='l', main="Time series Plot of Inflation Rate", xlab='Date: from Jan 1, 2018 to Dec 31, 2021', ylab='Inflation Rate(%)')
+
+a1 <- tsdata %>%
+  autoplot() 
+# Seasonal plot
+a2 <- tsdata %>% 
+  ggseasonplot(year.labels.left = TRUE,   # Add labels
+               year.labels = TRUE) 
+# Arrangement of plots
+plot_grid(a1, a2, ncol=1, rel_heights = c(1, 1.5))
+
+
+#plot(tsdata - mfit$seasonal)
+```
+
+## Stationary test
+```{r}
+dz<-zoo(data[,2],data[,1])
+
+## test if it's stationary
+adf.test(dz) #non-stationary
+#Box.test((dz), type="Ljung-Box")  # not independent 
+kpss.test(dz,'Trend') # Unit Root Test: not trend stationary
+par(pin = c(5,3))
+acf_o <- acf(((dz)), plot = FALSE, main = "ACF Plot of original inflation rate", cex.main = 3, width = 5)
+plot(acf_o, main = "Freeny's Quarterly Revenue Time Series ACF")
+pacf_o <- pacf(((dz)),  plot = FALSE, main = "PACF Plot of original inflation rate", cex.main = 3)
+plot(pacf_o, main = "Freeny's Quarterly Revenue Time Series ACF")
+
+
+##  not stationary, so we use first level of differencing data: the daily change of inflation rate
+
+ddz<-diff(dz)
+adf.test(ddz)
+#Box.test(diff(dz), lag=10, type="Ljung-Box")
+kpss.test(ddz,'Trend') # , lshort = FALSE
+#Box.test(diff(dz), lag=1, type="Ljung-Box")
+#Box.test(model$residuals, lag = 7, type = 'Ljung-Box')
+
+## plot the ACF & PACF
+acf(diff((dz)), plot = T, main = "ACF Plot of differencing data")
+pacf(diff((dz)),  plot = T, main = "PACF Plot of differencing data")
+
+## Now the differencing data is stationary, so we try arima
+## with acf & pacf
+```
+
+```{r}
+dz %>% diff() %>% ggtsdisplay(main="Plots of differencing data")
+# library('urca')
+# t1 <- ur.df(ddz, type="trend", lags=18, selectlags = "Fixed")
+# par(pin = c(3,1.2))
+# plot(t1)
+# summary(t1)
+# 
+# 
+# t2 <- ur.df(ddz, type="drift", lags=18, selectlags = "Fixed")
+# summary(t2)
+# 
+# 
+# t3 <- ur.df(ddz, type="none", lags=18, selectlags = "Fixed")
+# summary(t3)
+```
+
+```{r}
+# train test split
+train = tsdata[1:950]
+valid = tsdata[951:length(tsdata)]
+```
+
+```{r}
+m1 <- Arima(train, order=c(2,1,2), seasonal= list(order=c(1,0,2), period=13))
+summary(m1)
+```
+
+
+
+
+```{r}
+model1 <- arima(train, order = c(1,1,0))
+model2 <- arima(train, order = c(8,1,9))
+#summary(model1)
+summary(model2)
+```
+
+
+
+## arima model using first differencing data(set d=1)
+
+
+```{r}
+# training with some basic arima model
+model = auto.arima(train,d=1)
+AIC(model)
+summary(model)
+model1 <- arima(train, order = c(1,1,0))
+AIC(model1)
+model2 <- arima(train, order = c(2,1,0))
+AIC(model2)
+
+# mannual training
+eva=data.frame()
+k<-1
+for (i in 0:9){
+  for(j in 0:9){
+    model<-Arima(train, order = c(i,1,j),include.drift=TRUE)
+    eva[k,"AIC"]<-(AIC(model))
+    forecast<-forecast(model,51)
+    eva[k,"RMSE"]<-(rmse(valid, forecast$mean))
+    row.names(eva)[k]<-paste("AR(p):",arimaorder(model)[1],", I(d):",arimaorder(model)[2],", MA(q):",arimaorder(model)[3])
+    k<-k+1
+  }
+}
+eva
+
+eva[order(eva$AIC),]
+#eva[order(eva$RMSE),]
+
+
+## using all data for prediction
+fit1 <- Arima(tsdata, order = c(8,1,9),include.drift=TRUE)
+(arimaorder(fit1))
+
+hist(fit1$residuals)## normal
+# model summary
+summary(fit1)
+
+# evaluation
+future<- forecast(fit1, h = 51)
+#prediction <- predict(fit1,51)
+
+#rmse(valid, forecast$pred)
+rmse(valid, future$mean)
+
+coeftest(fit1) 
+
+```
+
+
+## prediction plot
+```{r}
+library(data.table)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+#plot prediction
+myforecast <- forecast(fit1, level=c(95), h=40)
+plot(myforecast)
+val_pred <- myforecast$mean[-1]
+
+pred_real <- read.csv('forecast_1822_0301.csv')
+pred <-  copy(pred_real)
+pred$value <- append(val_pred, pred$value[40:length(pred_real$value)])
+pred_last <- pred[c(1:150),] 
+dz_pred<-read.zoo(pred_last)
+plot(dz_pred, plot.type = "single", pch=16,type='l', main="Time series Plot of Inflation Rate", xlab='Date: from Jan 1, 2018 to Dec 31, 2021', ylab='Inflation Rate(%)')
+
+pred_compare <- copy(pred_real)
+pred_compare$forcast <- pred$value
+
+pred_compare$date <- as.Date(pred_compare$date)
+pred_compare <- pred_compare[c(1:150),]  %>% arrange(date) %>%
+  rename(true = value) %>% select(date,forcast,true)
+pred_compare_long <- melt(pred_compare, id="date")  # convert to long format
+pred_compare_long
+ggplot(data=pred_compare_long,
+       aes(x=date, y=value, colour=variable)) +
+       geom_line()
+
+# ## or 
+#  (tsdata) %>%
+#   Arima(order = c(8,1,9)) %>%
+#   forecast(h=91) %>%
+#   autoplot() 
+```
+
+
+```{r}
+#plot prediction
+# m1.fcast <- forecast(m1, level=c(95), h=51)
+# plot(m1.fcast)
+#  
+# pred_real <- read.csv('forecast_1822_0301.csv')
+# dz_pred<-read.zoo(pred)
+# plot(dz_pred, plot.type = "single", pch=16,type='l', main="Time series Plot of Inflation Rate", xlab='Date: from Jan 1, 2018 to Dec 31, 2021', ylab='Inflation Rate(%)')
+
+## or 
+ # (tsdata) %>%
+ #  Arima(order=c(8,1,9)) %>%
+ #  forecast(h=91) %>%
+ #  autoplot() 
+
+
+```
+
+
+```{r}
+# library(forecast)
+# model_tbats <- tbats(train)
+# summary(model_tbats)
+
+```
+
+```{r}
+# library(data.table)
+# predict <- predict(model_tbats) 
+# predict_val<- forecast(model_tbats, level=c(95), h = 40) # forecast for 2021.0 till 2021.6 i.e 6 months
+# predict_val<- predict_val$mean[-1]
+# 
+# pred_real <- read.csv('forecast_1822_0301.csv')
+# pred <-  copy(pred_real)
+# pred$value <- append(predict_val, pred$value[40:length(pred_real$value)])
+# pred_last <- pred[c(1:150),] 
+# dz_pred<-read.zoo(pred_last)
+# plot(dz_pred, plot.type = "single", pch=16,type='l', main="Time series Plot of Inflation Rate", xlab='Date: from Jan 1, 2018 to Dec 31, 2021', ylab='Inflation Rate(%)')
+# 
+# pred_compare <- copy(pred_real)
+# pred_compare$forcast <- pred$value
+# 
+# pred_compare$date <- as.Date(pred_compare$date)
+# pred_compare <- pred_compare[c(1:150),]  %>% arrange(date) %>%
+#   rename(true = value) %>% select(date,forcast,true)
+# pred_compare_long <- melt(pred_compare, id="date")  # convert to long format
+# pred_compare_long
+# ggplot(data=pred_compare_long,
+#        aes(x=date, y=value, colour=variable)) +
+#        geom_line()
+# 
+# plot(predict_val)
+```
+
+##Machine Learning
+```{r}
+#remotes::install_github("business-science/timetk")
+library(workflows)
+library(parsnip)
+library(recipes)
+library(yardstick)
+library(glmnet)
+library(tidyverse)
+library(tidyquant)
+library(timetk) # Use >= 0.1.3, remotes::install_github("business-science/timetk")
+
+library(tidymodels)
+library(modeltime)
+library(tidyverse)
+library(timetk)
+interactive = TRUE
+df <- read_csv("forecast_1822_0301.csv")
+
+df %>%
+  plot_time_series(date, value, .interactive = interactive)
+df <- df %>% arrange(date) # %>% filter(date>='2020-10-01')
+df_train$date <- as.Date(df_train$date) 
+
+splits <- df %>%
+  time_series_split(assess = "2 months", cumulative = TRUE)
+splits %>%
+  tk_time_series_cv_plan() %>%
+  plot_time_series_cv_plan(date, value, .interactive = interactive)
+
+
+# Add time series signature
+recipe_spec_timeseries <- recipe(value ~ ., data = training(splits)) %>%
+  step_timeseries_signature(date) 
+
+bake(prep(recipe_spec_timeseries), new_data = training(splits))
+
+recipe_spec_final <- recipe_spec_timeseries %>%
+  step_fourier(date, period = 30, K = 36) %>%
+  step_rm(date) %>%
+  step_rm(contains("iso"),
+          contains("minute"), contains("hour"),
+          contains("am.pm"), contains("xts")) %>%
+  step_normalize(contains("index.num"), date_year) %>%
+  step_dummy(contains("lbl"), one_hot = TRUE) 
+
+
+model_spec_lm <- linear_reg(mode = "regression") %>%
+  set_engine("lm")
+
+workflow_lm <- workflow() %>%
+  add_recipe(recipe_spec_final) %>%
+  add_model(model_spec_lm)
+
+workflow_lm
+
+workflow_fit_lm <- workflow_lm %>% fit(data = training(splits))
+
+model_table <- modeltime_table(
+  workflow_fit_lm
+) 
+
+model_table
+
+calibration_table <- model_table %>%
+  modeltime_calibrate(testing(splits))
+
+calibration_table
+
+calibration_table %>%
+  modeltime_forecast(actual_data = df[c(900:1040),]) %>%
+  plot_modeltime_forecast(.interactive = interactive)
+
+
+calibration_table %>%
+  modeltime_accuracy() %>%
+  table_modeltime_accuracy(.interactive = interactive)
+```
+
